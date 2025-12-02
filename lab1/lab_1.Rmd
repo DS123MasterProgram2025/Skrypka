@@ -1,0 +1,82 @@
+---
+title: "Лабораторна робота №1. Створення основи типового Data Science-проєкту"
+author: ""
+date: ""
+output:
+  html_notebook:
+    toc: yes
+    toc_float: true
+    number_sections: yes
+editor_options:
+  chunk_output_type: inline
+encoding: UTF-8
+---
+**Мета:** *"Швидкий старт" для створення бази Data Science-проекту у середовищі RStudio із застосуванням концепції "грамотного програмування" засобами мови програмування R, пакету RMarkdown та системи комп'ютерної верстки LaTeX*.
+
+## Хід роботи
+
+1.  Ознайомитися з можливостями пакету `ggplot2` [@ggplot2].
+
+2.  Оптимізувати код, наведений у даній методичці, за допомогою потокового оператора `%>%` засобами пакету `ggplot2`.
+
+```{r fig_1, fig.cap="Графік функції"}
+library(dplyr)
+library(ggplot2)
+library(rio)
+
+intercept <- 2     
+slope_1 <- 0.8     
+slope_2 <- 1.5     
+
+func_data <- data.frame(input = seq(-2, 2, 0.15)) %>% 
+  mutate(output = intercept + slope_1 * input + slope_2 * input^2)
+
+str(func_data)
+head(func_data)
+```
+
+3.  Побудувати графік функції засобами пакету `ggplot2`.
+
+```{r ggplot_plot, fig.cap="Графік функції, побудований за допомогою ggplot2"}
+    
+ggplot(data = func_data, aes(x = input, y = output)) +
+  geom_line(color = "darkgreen", linetype = "dashed", linewidth = 1.2) +
+  geom_point(color = "darkorange", size = 3, shape = 18) +
+  labs(
+    title = "Графік модельованої функції",
+    subtitle = "Демонстрація можливостей ggplot2",
+    x = "Аргумент (Input)",
+    y = "Значення функції (Output)"
+  ) +
+  theme_light() +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5))
+```
+
+Робота з файлами та таблицями
+
+```{r file_and_table_operations}
+output_dir <- "results"
+
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir)
+  message(paste("Папку", output_dir, "створено."))
+}
+
+file_path <- file.path(output_dir, "calculated_values.csv")
+
+export(func_data, file_path)
+
+imported_data <- import(file_path)
+
+knitr::kable(head(imported_data), 
+             caption = "Табл. 1. Перегляд імпортованих даних",
+             align = 'c')
+
+DT::datatable(imported_data, options = list(pageLength = 5))
+```
+
+
+**Висновки**
+
+У ході лабораторної роботи було створено базовий проект Data Science, застосовано пайплайни для обробки даних та побудовано кастомізований графік у середовищі R
+

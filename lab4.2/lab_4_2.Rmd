@@ -1,0 +1,179 @@
+---
+title: "Лабораторна робота № 4. Побудова моделей класифікації ІІ. Пакет tidymodels"
+author: ''
+date: ""
+output:
+  html_notebook:
+    toc: true
+    toc_float: true
+    number_sections: true
+  html_document:
+    toc: true
+    df_print: paged
+editor_options:
+  chunk_output_type: inline
+encoding: "UTF-8"
+---
+**Мета:** *Засвоєння базових принципів, знайомство з інструментами та набуття навичок побудови, eкспорту та імпорту моделей класифікації на рівні технології на основі статистичного підходу та моделей машинного навчання засобами мови програмування R та за допомогою універсального інтерфейсу доступа до функцій машинного навчання пакету `tidymodels`.*
+
+
+## Підготовка середовища та даних
+
+Для цієї роботи ми використовуємо набір даних `hw` (Height-Weight), що містить інформацію про зріст, вагу та стать людей. Наша мета — навчити модель розрізняти чоловіків та жінок.
+
+Завантажимо необхідні бібліотеки. Для LDA в екосистемі `tidymodels` додатково потрібен пакет `discrim`.
+
+```{r setup, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(tidymodels)
+library(discrim)
+library(DBI)
+library(RSQLite)
+library(knitr)
+library(readxl)
+
+theme_set(theme_light())
+```
+
+## Імпорт та очищення даних
+
+Зчитаємо дані з `xlsx`-файлу та підготуємо їх до моделювання: перейменуємо стовпці англійською мовою та перетворимо цільову змінну у фактор.
+
+```{r}
+raw_data <- read_excel("data/hw.xlsx")
+
+hw_data <- raw_data %>%
+  rename(Height = 1, Weight = 2, Gender = 3) %>%
+  mutate(Gender = as.factor(Gender)) %>%
+  filter(Height > 0, Weight > 0)
+
+glimpse(hw_data)
+```
+
+## Розвідувальний аналіз (`EDA`)
+
+Побудуємо графік розсіювання, щоб оцінити, наскільки добре розділяються класи чоловіків та жінок візуально. Це допоможе зрозуміти, чи ефективно спрацює лінійний розділювач (`LDA`).
+
+```{r}
+ggplot(hw_data, aes(x = Height, y = Weight, color = Gender)) +
+  geom_point(alpha = 0.6, size = 2) +
+  scale_color_manual(values = c("Man" = "#3498db", "Woman" = "#e74c3c")) +
+  labs(
+    title = "Антропометричні дані",
+    subtitle = "Візуалізація класів для LDA",
+    x = "Зріст (см)",
+    y = "Вага (кг)"
+  ) +
+  stat_ellipse(level = 0.95, linetype = 2) 
+```
+
+Висновок `EDA`: Класи мають чіткі центри скупчення, хоча є зона перекриття. Лінійний дискримінантний аналіз тут має спрацювати добре.
+
+## Побудова моделі LDA
+
+### Розділення даних
+
+Розбиваємо вибірку на тренувальну (75%) та тестову (25%).
+
+```{r}
+set.seed(2024)
+hw_split <- initial_split(hw_data, prop = 0.75, strata = Gender)
+
+train_set <- training(hw_split)
+test_set  <- testing(hw_split)
+
+cat("Тренувальна вибірка:", nrow(train_set), "рядків\n")
+cat("Тестова вибірка:", nrow(test_set), "рядків\n")
+```
+
+### Специфікація моделі та Workflow
+
+Створимо специфікацію для моделі `LDA` (`discrim_linear`) та об'єднаємо її з формулою в `workflow`. Використовуємо двигун `MASS`, який є стандартом для `LDA` в `R`.
+
+```{r}
+lda_spec <- discrim_linear() %>%
+  set_engine("MASS") %>%
+  set_mode("classification")
+
+lda_workflow <- workflow() %>%
+  add_model(lda_spec) %>%
+  add_formula(Gender ~ Height + Weight)
+
+lda_workflow
+```
+
+### Навчання моделі
+
+```{r}
+lda_fit <- fit(lda_workflow, data = train_set)
+
+lda_fit %>% 
+  extract_fit_engine()
+```
+
+## Оцінка якості моделі
+
+Перевіримо точність класифікації на тестовій вибірці.
+```{r}
+predictions <- predict(lda_fit, test_set) %>%
+  bind_cols(test_set)
+
+conf_mat(predictions, truth = Gender, estimate = .pred_class)
+
+accuracy_metric <- accuracy(predictions, truth = Gender, estimate = .pred_class)
+kable(accuracy_metric, caption = "Метрика точності моделі")
+```
+
+## Експорт та імпорт моделі через `SQLite`
+
+Реалізуємо сценарій збереження навченої моделі у базу даних для подальшого використання.
+
+```{r}
+model_blob <- serialize(lda_fit, connection = NULL)
+
+conn <- dbConnect(RSQLite::SQLite(), "classifier_models.db")
+
+dbExecute(conn, "
+  CREATE TABLE IF NOT EXISTS saved_models (
+    id INTEGER PRIMARY KEY,
+    name TEXT,
+    data BLOB,
+    timestamp TEXT
+  )
+")
+
+dbExecute(conn, "DELETE FROM saved_models WHERE name = 'gender_lda'")
+
+record <- tibble(
+  name = "gender_lda",
+  data = list(model_blob),
+  timestamp = as.character(Sys.time())
+)
+
+dbAppendTable(conn, "saved_models", record)
+dbDisconnect(conn)
+
+print("Модель успішно збережена в базу даних.")
+```
+
+### Перевірка імпорту
+
+Спробуємо завантажити модель назад і зробити прогноз для нової людини.
+
+```{r}
+conn <- dbConnect(RSQLite::SQLite(), "classifier_models.db")
+
+loaded_rec <- dbGetQuery(conn, "SELECT data FROM saved_models WHERE name = 'gender_lda'")
+dbDisconnect(conn)
+
+imported_model <- unserialize(loaded_rec$data[[1]])
+
+new_person <- data.frame(Height = 185, Weight = 90)
+pred_result <- predict(imported_model, new_person)
+
+cat("Прогноз для параметрів (185 см, 90 кг):", as.character(pred_result$.pred_class))
+```
+
+## Висновки
+
+У ході лабораторної роботи було побудовано модель класифікації статі на основі методу `LDA` з використанням бібліотеки `tidymodels`. Модель показала високу точність на тестових даних, що підтверджує наявність чіткої залежності між антропометричними даними та статтю. Також було відпрацьовано механізм збереження моделі у реляційну базу даних.

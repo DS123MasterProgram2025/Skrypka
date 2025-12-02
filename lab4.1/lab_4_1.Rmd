@@ -1,0 +1,154 @@
+---
+title: "Лабораторна робота № 4. Побудова моделей класифікації І. Пакет caret"
+author: ''
+date: ""
+output:
+  html_notebook:
+    toc: true
+    toc_float: true
+    number_sections: true
+  html_document:
+    toc: true
+    df_print: paged
+editor_options:
+  chunk_output_type: inline
+encoding: "UTF-8"
+---
+**Мета:** *Засвоєння базових принципів, знайомство з інструментами та набуття навичок побудови, eкспорту та імпорту моделей класифікації на рівні технології на основі статистичного підходу та моделей машинного навчання засобами мови програмування R та за допомогою універсального інтерфейсу доступа до функцій машинного навчання пакету `caret`.*
+
+## Підготовка та аналіз даних
+
+
+### Завантаження та очищення
+
+```{r setup, message=FALSE, warning=FALSE}
+
+library(tidyverse)
+library(caret)
+library(palmerpenguins)
+library(DBI)
+library(RSQLite)
+
+data(penguins)
+
+df_penguins <- penguins %>%
+  drop_na() %>%
+  select(-year)
+
+glimpse(df_penguins)
+```
+
+### Візуалізація класів
+
+Побудуємо графік, щоб побачити, чи є візуальна різниця між самцями та самками за масою тіла та довжиною плавця.
+
+```{r}
+ggplot(df_penguins, aes(x = flipper_length_mm, y = body_mass_g, color = sex)) +
+  geom_point(alpha = 0.7, size = 2) +
+  facet_wrap(~species) + 
+  scale_color_manual(values = c("female" = "#FF6B6B", "male" = "#4ECDC4")) +
+  labs(title = "Статевий диморфізм пінгвінів",
+       subtitle = "Залежність маси від довжини плавця",
+       x = "Довжина плавця (мм)",
+       y = "Маса тіла (г)",
+       color = "Стать") +
+  theme_minimal()
+```
+
+Як бачимо, самці (бірюзові точки) зазвичай більші за самок (червоні точки), але зони перекриваються, тому проста перевірка "на око" не дасть 100% точності. Потрібна модель.
+
+## Побудова моделі LDA
+
+### Розділення вибірки
+
+Використовуємо класичне розбиття: 75% даних для навчання моделі, 25% — для тестування.
+
+```{r}
+set.seed(2023) 
+
+train_idx <- createDataPartition(df_penguins$sex, p = 0.75, list = FALSE)
+
+train_set <- df_penguins[train_idx, ]
+test_set  <- df_penguins[-train_idx, ]
+
+cat("Розмір навчальної вибірки:", nrow(train_set), "\n")
+cat("Розмір тестової вибірки:", nrow(test_set), "\n")
+```
+
+### Навчання
+
+Використовуємо пакет caret для тренування моделі LDA з використанням крос-валідації (Repeated CV).
+
+```{r}
+ctrl_params <- trainControl(method = "repeatedcv",
+                            number = 10,
+                            repeats = 3)
+
+lda_model_caret <- train(sex ~ ., 
+                         data = train_set,
+                         method = "lda",
+                         trControl = ctrl_params)
+
+print(lda_model_caret)
+```
+
+## Експорт та імпорт моделі
+
+Зімітуємо ситуацію "продакшн": збережемо модель у файл бази даних, щоб потім використати її в іншому сеансі.
+
+```{r}
+serialized_model <- rawToChar(serialize(lda_model_caret, NULL, TRUE))
+
+conn <- dbConnect(RSQLite::SQLite(), dbname = "penguin_lab.db")
+
+dbExecute(conn, "DROP TABLE IF EXISTS ml_models")
+dbExecute(conn, "CREATE TABLE ml_models (
+                    id INTEGER PRIMARY KEY,
+                    algorithm_name TEXT,
+                    model_blob BLOB,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                 )")
+
+query <- "INSERT INTO ml_models (algorithm_name, model_blob) VALUES (:algo, :blob)"
+dbExecute(conn, query, params = list(algo = "LDA_Penguin_Sex", blob = serialized_model))
+
+cat("Модель успішно записана в базу даних.\n")
+```
+
+### Відновлення моделі
+
+Тепер зчитаємо модель назад з бази даних для перевірки.
+
+```{r}
+loaded_data <- dbGetQuery(conn, "SELECT model_blob FROM ml_models WHERE algorithm_name = 'LDA_Penguin_Sex'")
+
+restored_model <- unserialize(charToRaw(loaded_data$model_blob[1]))
+
+dbDisconnect(conn)
+
+cat("Модель відновлено. Тип об'єкта:", class(restored_model)[1])
+```
+
+
+## Оцінка якості класифікації
+
+Використаємо відновлену модель для прогнозування статі пінгвінів з тестового набору.
+
+```{r}
+predictions <- predict(restored_model, newdata = test_set)
+
+conf_matrix <- confusionMatrix(predictions, test_set$sex)
+
+print(conf_matrix)
+
+```
+
+## Аналіз результатів
+
+Матриця плутанини показує, як часто модель помилялася:
+
+**Accuracy (Точність)**: Загальний відсоток правильних відповідей.
+
+**Sensitivity/Specificity**: Здатність правильно визначати самок та самців відповідно.
+
+Як бачимо, LDA добре справляється з розділенням статей на основі фізичних вимірів, оскільки показник точності (Accuracy) є високим (зазвичай > 85% для цього датасету).
